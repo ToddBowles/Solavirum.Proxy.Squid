@@ -1,0 +1,616 @@
+{
+    "Description": "This template creates an auto scaling Squid Proxy.",
+    "Parameters": {
+        "SquidProxyInstanceType": {
+            "Description": "Web server EC2 instance type",
+            "Type": "String",
+            "Default": "t2.medium",
+            "AllowedValues": [
+                "t2.small",
+                "t2.medium",
+                "m1.small",
+                "m1.medium",
+                "m1.large",
+                "m1.xlarge",
+                "m2.xlarge",
+                "m2.2xlarge",
+                "m2.4xlarge",
+                "m3.medium",
+                "m3.large",
+                "m3.xlarge",
+                "m3.2xlarge",
+                "c1.medium",
+                "c1.xlarge"
+            ],
+            "ConstraintDescription": "must be a valid EC2 instance type."
+        },
+        "VpcId": {
+            "Type": "AWS::EC2::VPC::Id",
+            "Default": "vpc-a0a6aec9",
+            "Description": "VpcId of your existing Virtual Private Cloud (VPC)",
+            "ConstraintDescription": "must be the VPC Id of an existing Virtual Private Cloud."
+        },
+        "PrivateSubnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>",
+            "Default": "subnet-b1299cd4,subnet-c2f220b5",
+            "Description": "Private subnets, intended to be used by the internal load balancer for the proxy.",
+            "ConstraintDescription": "must be a list of existing subnets in the selected Virtual Private Cloud."
+        },
+        "PublicSubnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>",
+            "Default": "subnet-da299cbf,subnet-d2f220a5",
+            "Description": "Public subnets (i.e. ones that are automatically assigned public IP addresses) spread across availability zones, intended to be used by the proxy instances (which require public access).",
+            "ConstraintDescription": "must be a list of existing subnets in the selected Virtual Private Cloud."
+        },
+        "OperatorEMail": {
+            "Description": "Email address to notify if there are any scaling operations",
+            "Type": "String",
+            "Default": "gatewaylivenotifications@onthehouse.com.au",
+            "AllowedPattern": "([a-zA-Z0-9_\\-\\.]+)@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.)|(([a-zA-Z0-9\\-]+\\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\\]?)",
+            "ConstraintDescription": "must be a valid email address."
+        },
+        "KeyName": {
+            "Description": "The EC2 Key Pair to allow RDP access to the instances",
+            "Type": "AWS::EC2::KeyPair::KeyName",
+            "Default": "ConsoleMasterKeyPair",
+            "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+        },
+        "AdminPassword": {
+            "Description": "Password for the Administrator user account",
+            "Type": "String",
+            "NoEcho": "true"
+        },
+        "OctopusAPIKey": {
+            "Description": "Octopus API Key",
+            "Type": "String"
+        },
+        "OctopusServerURL": {
+            "Description": "Octopus Server URL",
+            "Type": "String"
+        },
+        "SquidProxyInstanceRoles": {
+            "Description": "Comma separated list of Octopus roles to apply to the web server machines.",
+            "Type": "String",
+            "Default": "SquidProxy,SystemStatsLogger"
+        },
+        "OctopusEnvironment": {
+            "Description": "Octopus Environment",
+            "Type": "String"
+        },
+        "DependenciesS3Bucket": {
+            "Description": "The name of the bucket that the dependencies archive is inside.",
+            "Type": "String"
+        },
+        "DependenciesS3BucketAccessKey" : {
+			"Description" : "The Access Key for a user who is able to access the S3 location containing the dependencies archive.",
+			"Type" : "String"
+		},
+        "DependenciesS3BucketSecretKey" : {
+			"Description" : "The Secret Key for a user who is able to access the S3 location containing the dependencies archive.",
+			"Type" : "String"
+		},
+        "DependenciesArchiveS3Url": {
+            "Description": "The URL to the dependencies archive required by the various elements in the stack. This archive contains various elements from the source tree at the time the script was executed.",
+            "Type": "String"
+        },
+        "SslCertificateId": {
+            "Description": "The ID of the SSL certificate to be used by the public facing load balancer. Certificate is available inside the AWS account under this specified name.",
+            "Type": "String",
+            "Default": "star_console_othsolutions_com_au"
+        },
+        "AwsVpnCidr": {
+            "Description": "The CIDR (i.e. IP address range) that will be able to access any instances spun up as part of this template over remote desktop.",
+            "Type": "String",
+            "Default": "10.250.240.0/21"
+        },
+        "HostedZone": {
+            "Description": "The name of a Hosted Zone in AWS Route 53 to use as the root for the URL for the API.",
+            "Type": "String",
+            "Default": "aws.console.othsolutions.com.au"
+        },
+        "AmiId": {
+            "Description": "The AMI ID, eg ami-a3a2d599 to use for the base windows server instances.",
+            "Type": "String"
+        },
+        "LogsS3BucketName": {
+            "Description": "The name of the bucket where log files for the ELB and other things will be placed.",
+            "Type": "String"
+        },
+        "SquidProxyAutoScalingGroupDesiredCapacity": {
+            "Description": "The number of instances that will be immediately provisioned in the Accounts Payable API Auto Scaling Group.",
+            "Type": "Number",
+            "Default": "2"
+        }
+    },
+    "Resources": {
+        "LogsBucket": {
+            "Type": "AWS::S3::Bucket",
+            "Properties": {
+                "BucketName": { "Ref": "LogsS3BucketName" },
+                "LifecycleConfiguration": {
+                    "Rules": [
+                        {
+                            "Id": 1,
+                            "ExpirationInDays": 7,
+                            "Status": "Enabled"
+                        }
+                    ]
+                }
+            }
+        },
+        "LogsBucketPolicyForELB": {
+            "Type": "AWS::S3::BucketPolicy",
+            "DependsOn": "LogsBucket",
+            "Properties": {
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Id": "3b78fce67fdd4e4a806fc265a95c6c20",
+                    "Statement": [
+                        {
+                            "Sid": "6750e35d601c4faeb13ac66952830c65",
+                            "Action": [ "s3:PutObject" ],
+                            "Effect": "Allow",
+                            "Resource": { "Fn::Join": [ "", [ "arn:aws:s3:::", { "Ref": "LogsBucket" }, "/SquidProxyInternalLoadBalancer/AWSLogs/", { "Ref": "AWS::AccountId" }, "/*" ] ] },
+                            "Principal": { "AWS": "783225319266" }
+                        }
+                    ]
+                },
+                "Bucket": { "Ref": "LogsBucket" }
+            }
+        },
+        "SquidProxyInstanceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version" : "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+                            "Action": [ "sts:AssumeRole" ]
+                        }
+                    ]
+                },
+                "Path": "/"
+            }
+        },
+        "SquidProxyInstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": { "Path": "/", "Roles": [ { "Ref": "SquidProxyInstanceRole" } ] }
+        },
+        "NotificationTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "Subscription": [
+                    {
+                        "Endpoint": { "Ref": "OperatorEMail" },
+                        "Protocol": "email"
+                    }
+                ]
+            }
+        },
+        "SquidProxyAutoScalingGroup": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "AvailabilityZones": { "Fn::GetAZs": "" },
+                "VPCZoneIdentifier": { "Ref": "PublicSubnets" },
+                "LaunchConfigurationName": { "Ref": "SquidProxyInstanceLaunchConfig" },
+                "DesiredCapacity": { "Ref": "SquidProxyAutoScalingGroupDesiredCapacity" },
+                "MinSize": "0",
+                "MaxSize": "10",
+                "LoadBalancerNames": [
+                    {  "Ref": "SquidProxyInternalLoadBalancer" }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": { "Fn::Join": [ "", [ "SquidProxy ", "[", { "Ref": "OctopusEnvironment" }, "]" ] ] },
+                        "PropagateAtLaunch": "true"
+                    },
+                    {
+                        "Key": "OctopusEnvironment",
+                        "Value": { "Ref": "OctopusEnvironment" },
+                        "PropagateAtLaunch": "true"
+                    }
+                ],
+                "NotificationConfiguration": {
+                    "TopicARN": { "Ref": "NotificationTopic" },
+                    "NotificationTypes": [
+                        "autoscaling:EC2_INSTANCE_LAUNCH",
+                        "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
+                        "autoscaling:EC2_INSTANCE_TERMINATE",
+                        "autoscaling:EC2_INSTANCE_TERMINATE_ERROR"
+                    ]
+                }
+            },
+            "UpdatePolicy": {
+                "AutoScalingRollingUpdate": {
+                    "MinInstancesInService": "1",
+                    "MaxBatchSize": "1",
+                    "PauseTime": "PT15M",
+                    "WaitOnResourceSignals": "true"
+                }
+            }
+        },
+        "SquidProxyInstancesWaitHandle" : {
+           "Type" : "AWS::CloudFormation::WaitConditionHandle"
+        },
+        "SquidProxyInstancesWaitCondition" : {
+           "Type" : "AWS::CloudFormation::WaitCondition",
+           "DependsOn" : "SquidProxyAutoScalingGroup",
+           "Properties" : {
+              "Handle"  : { "Ref" : "SquidProxyInstancesWaitHandle" },
+              "Timeout" : "900",
+              "Count"   : { "Ref" : "SquidProxyAutoScalingGroupDesiredCapacity" }
+           }
+        },
+        "SquidProxyInstanceLaunchConfig": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Metadata": {
+                "Comment": "Set up instance",
+                "AWS::CloudFormation::Init": {
+                    "configSets": {
+                        "config": [
+                            "setup",
+                            "bootstrapDSC",
+                            "deploy"
+                        ]
+                    },
+                    "setup": {
+                        "files": {
+                            "c:\\cfn\\cfn-hup.conf": {
+                                "content": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "[main]\n",
+                                            "stack=", { "Ref": "AWS::StackName" },
+                                            "\n",
+                                            "region=", { "Ref": "AWS::Region" },
+                                            "\n"
+                                        ]
+                                    ]
+                                }
+                            },
+                            "c:\\cfn\\hooks.d\\cfn-auto-reloader.conf": {
+                                "content": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "[cfn-auto-reloader-hook]\n",
+                                            "triggers=post.update\n",
+                                            "path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init\n",
+                                            "action=cfn-init.exe -v -c config -s ", { "Ref": "AWS::StackId" },
+                                            " -r SquidProxyInstanceLaunchConfig",
+                                            " --region ", { "Ref": "AWS::Region" },
+                                            "\n"
+                                        ]
+                                    ]
+                                }
+                            }
+                        },
+                        "sources": {
+                            "c:\\cfn\\dependencies": { "Ref": "DependenciesArchiveS3Url" }
+                        },
+                        "services": {
+                            "windows": {
+                                "cfn-hup": {
+                                    "enabled": "true",
+                                    "ensureRunning": "true",
+                                    "files": [
+                                        "c:\\cfn\\cfn-hup.conf",
+                                        "c:\\cfn\\hooks.d\\cfn-auto-reloader.conf"
+                                    ]
+                                }
+                            }
+                        },
+                        "commands": {
+                            "a-set-execution-policy": {
+                                "command": "powershell.exe -command Set-ExecutionPolicy RemoteSigned -Force",
+                                "waitAfterCompletion": "0"
+                            },
+                            "b-extract-and-install-modules": {
+                                "command": "powershell.exe -File C:\\cfn\\dependencies\\scripts\\environment\\Install-EnvironmentModules.ps1",
+                                "waitAfterCompletion": "0"
+                            },
+                            "c-reset-local-admin": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -executionpolicy remotesigned -command C:\\cfn\\dependencies\\scripts\\environment\\Reset-LocalAdminPassword.ps1 -password '",
+                                            { "Ref": "AdminPassword" },
+                                            "'"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            },
+                            "d-configure-log-management": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -ExecutionPolicy Bypass -Command c:\\cfn\\dependencies\\scripts\\common\\Invoke-ConfigureCommonLogManagement.ps1",
+                                            " -Verbose"
+                                        ]
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "bootstrapDSC": {
+                        "commands": {
+                            "a-create-cert": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -command c:\\cfn\\dependencies\\scripts\\environment\\New-DSCCertificate.ps1 -Password '",
+                                            { "Ref": "AdminPassword" },
+                                            "'",
+                                            " -Instance localhost"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            },
+                            "b-run-dsc-config": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -ExecutionPolicy Bypass -Command c:\\cfn\\dependencies\\scripts\\environment\\DSC-WebServerDeployedViaOctopus.ps1",
+                                            " -ApiKey ", { "Ref": "OctopusAPIKey" },
+                                            " -OctopusServerUrl ", { "Ref": "OctopusServerURL" },
+                                            " -Roles '", { "Ref": "SquidProxyInstanceRoles" }, ",", { "Ref": "AWS::StackName" }, "'",
+                                            " -Environments ", { "Ref": "OctopusEnvironment" },
+                                            " -ListenPort 10933"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            }
+                        }
+                    },
+                    "deploy": {
+                        "commands": {
+                            "a-deploy-proxy": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -ExecutionPolicy Bypass -Command c:\\cfn\\dependencies\\scripts\\environment\\Invoke-DeployLatestProjectForEnvironment.ps1 ",
+                                            " -Verbose",
+                                            " -OctopusServerApiKey ", { "Ref": "OctopusAPIKey" },
+                                            " -OctopusServerUrl ", { "Ref": "OctopusServerURL" },
+                                            " -OctopusEnvironment ", { "Ref": "OctopusEnvironment" },
+                                            " -ProjectName 'Oth.Console.Proxy.Squid'"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            },
+                            "b-deploy-system-stats-logger": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -ExecutionPolicy Bypass -Command c:\\cfn\\dependencies\\scripts\\environment\\Invoke-DeployLatestProjectForEnvironment.ps1 ",
+                                            " -Verbose",
+                                            " -OctopusServerApiKey ", { "Ref": "OctopusAPIKey" },
+                                            " -OctopusServerUrl ", { "Ref": "OctopusServerURL" },
+                                            " -OctopusEnvironment ", { "Ref": "OctopusEnvironment" },
+                                            " -ProjectName 'SS_Proxy.Squid'"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            },
+                            "c-deploy-logstash": {
+                                "command": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "powershell.exe -ExecutionPolicy Bypass -Command c:\\cfn\\dependencies\\scripts\\environment\\Invoke-DeployLatestProjectForEnvironment.ps1 ",
+                                            " -Verbose",
+                                            " -OctopusServerApiKey ", { "Ref": "OctopusAPIKey" },
+                                            " -OctopusServerUrl ", { "Ref": "OctopusServerURL" },
+                                            " -OctopusEnvironment ", { "Ref": "OctopusEnvironment" },
+                                            " -ProjectName 'LOGSTASH_Proxy.Squid'"
+                                        ]
+                                    ]
+                                },
+                                "waitAfterCompletion": "0"
+                            }
+                        }
+                    }
+                },
+                "AWS::CloudFormation::Authentication": {
+                  "S3AccessCreds": {
+                    "type": "S3",
+                    "accessKeyId" : { "Ref" : "DependenciesS3BucketAccessKey" },
+                    "secretKey" : { "Ref": "DependenciesS3BucketSecretKey" },
+                    "buckets" : [ { "Ref":"DependenciesS3Bucket" } ]
+                  }
+                }
+            },
+            "Properties": {
+                "KeyName": { "Ref": "KeyName" },
+                "ImageId": { "Ref": "AmiId" },
+                "SecurityGroups": [ { "Ref": "SquidProxyInstanceSecurityGroup" } ],
+                "InstanceType": { "Ref": "SquidProxyInstanceType" },
+                "IamInstanceProfile": { "Ref": "SquidProxyInstanceProfile" },
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "<script>\n",
+                                "cfn-init.exe -v -c config -s ", { "Ref": "AWS::StackId" },
+                                " -r SquidProxyInstanceLaunchConfig",
+                                " --region ", { "Ref": "AWS::Region" },
+                                "\n",
+                                "cfn-signal.exe -e %ERRORLEVEL% ", { "Fn::Base64" : { "Ref" : "SquidProxyInstancesWaitHandle" } },
+                                "\n",
+                                "</script>\n"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "SquidProxyInternalLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+            "DependsOn": "LogsBucketPolicyForELB",
+            "Properties": {
+                "Scheme": "internal",
+                "SecurityGroups": [ { "Ref": "SquidProxyInternalLoadBalancerSecurityGroup" } ],
+                "Subnets": { "Ref": "PrivateSubnets" },
+                "AccessLoggingPolicy": {
+                    "EmitInterval": 5,
+                    "Enabled": "true",
+                    "S3BucketName": { "Fn::Join": [ "", [ { "Ref": "LogsS3BucketName" } ] ] },
+                    "S3BucketPrefix": "SquidProxyInternalLoadBalancer"
+                },
+                "LBCookieStickinessPolicy": [ { "PolicyName": "CookieStickinessPolicy" } ],
+                "CrossZone": "true",
+                "Listeners": [
+                    {
+                        "LoadBalancerPort": "3128",
+                        "InstancePort": "3128",
+                        "Protocol": "TCP"
+                    }
+                ],
+                "HealthCheck": {
+                    "Target": "TCP:3128",
+                    "HealthyThreshold": "3",
+                    "UnhealthyThreshold": "5",
+                    "Interval": "30",
+                    "Timeout": "5"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": { "Fn::Join": [ "", [ "SquidProxy-ELB-", { "Ref": "OctopusEnvironment" } ] ] }
+                    },
+                    {
+                        "Key": "OctopusEnvironment",
+                        "Value": { "Ref": "OctopusEnvironment" }
+                    }
+                ]
+            }
+        },
+        "SquidProxyInternalLoadBalancerSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Enable incoming requests from the OTH AWS VPN and from all addresses inside our VPC and allow outgoing requests to all addresses inside our VPC.",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3128",
+                        "ToPort": "3128",
+                        "CidrIp": "10.250.32.0/20"
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3128",
+                        "ToPort": "3128",
+                        "CidrIp": { "Ref": "AwsVpnCidr" }
+                    }
+                ],
+                "SecurityGroupEgress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3128",
+                        "ToPort": "3128",
+                        "CidrIp": "10.250.32.0/20"
+                    }
+                ]
+            }
+        },
+        "SquidProxyInstanceSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Enable RDP, HTTP and Powershell Remote Execution from the office (via VPN), Octopus from Octopus server only and HTTP from the load balancer.",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3389",
+                        "ToPort": "3389",
+                        "CidrIp": { "Ref": "AwsVpnCidr" }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "5985",
+                        "ToPort": "5985",
+                        "CidrIp": { "Ref": "AwsVpnCidr" }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "10933",
+                        "ToPort": "10933",
+                        "CidrIp": "10.250.32.45/32"
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3128",
+                        "ToPort": "3128",
+                        "SourceSecurityGroupId": { "Ref": "SquidProxyInternalLoadBalancerSecurityGroup" }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3128",
+                        "ToPort": "3128",
+                        "CidrIp": { "Ref": "AwsVpnCidr" }
+                    }
+                ]
+            }
+        },
+        "SquidProxyDnsRecord": {
+            "Type": "AWS::Route53::RecordSet",
+            "Properties": {
+                "HostedZoneName": { "Fn::Join": [ "", [ { "Ref": "HostedZone" }, "." ] ] },
+                "Name": { "Fn::Join": [ "", [ { "Ref": "OctopusEnvironment" }, "-proxy-squid.", { "Ref": "HostedZone" } ] ] },
+                "Type": "A",
+                "AliasTarget": {
+                  "HostedZoneId" : { "Fn::GetAtt" : ["SquidProxyInternalLoadBalancer", "CanonicalHostedZoneNameID"] },
+                  "DNSName" : { "Fn::GetAtt" : ["SquidProxyInternalLoadBalancer","DNSName"] }
+                }
+            }
+        },
+        "APIInstancesUnhealthy": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmName": { "Fn::Join": [ "", [ "SquidProxy INSTANCES UNHEALTHY ", "[", { "Ref": "OctopusEnvironment" }, "]" ] ] },
+                "AlarmDescription": "Alarm API Instances UnHealthy",
+                "MetricName": "UnHealthyHostCount",
+                "Namespace": "AWS/ELB",
+                "Statistic": "Sum",
+                "Period": "60",
+                "EvaluationPeriods": "3",
+                "Threshold": "0",
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [
+                    {
+                        "Name": "LoadBalancerName",
+                        "Value": { "Ref": "SquidProxyInternalLoadBalancer" }
+                    }
+                ],
+                "AlarmActions": [
+                    {
+                        "Ref": "NotificationTopic"
+                    }
+                ]
+            }
+        }
+    },
+	"Outputs" : {
+		"URL" : {
+			"Description" : "The URL of the Accounts Payable API.",
+			"Value" : { "Fn::Join" : ["", ["http://", { "Ref" : "SquidProxyDnsRecord" }, ":3128" ] ] }
+		}
+	}
+}

@@ -1,0 +1,22 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
+    <metadata>
+        <id>Solavirum.Proxy.Squid</id>
+        <version>$version$</version>
+        <authors>Todd Bowles</authors>
+        <owners>Todd Bowles</owners>
+        <description>A package that allows the deployment of Squid along with a specific configuration.</description>
+        <releaseNotes></releaseNotes>
+        <copyright>Copyright Todd Bowles 2015</copyright>
+        <tags></tags>
+        <dependencies></dependencies>
+    </metadata>
+
+    <files>
+        <file src="configuration\*" target="configuration\" />
+        <file src="scripts\**" target="scripts\" />
+        <file src="installer\*" target="installer\" />
+        <file src="*.ps1" />
+    </files>
+
+</package>
